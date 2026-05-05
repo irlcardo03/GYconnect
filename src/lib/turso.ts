@@ -4,22 +4,16 @@ const globalForTurso = globalThis as unknown as {
   turso: Client | undefined
 }
 
-// Try Turso first, fall back to local SQLite
 function createDbClient(): Client {
   const tursoUrl = process.env.TURSO_URL
   const tursoToken = process.env.TURSO_TOKEN
   
   if (tursoUrl && tursoUrl.startsWith('libsql://') && tursoToken) {
-    try {
-      console.log('[DB] Attempting Turso connection:', tursoUrl)
-      return createClient({ url: tursoUrl, authToken: tursoToken })
-    } catch (err) {
-      console.error('[DB] Turso connection failed, falling back to local SQLite:', err)
-    }
+    console.log('[DB] Connecting to Turso:', tursoUrl)
+    return createClient({ url: tursoUrl, authToken: tursoToken })
   }
   
-  // Fallback to local SQLite
-  console.log('[DB] Using local SQLite database')
+  console.log('[DB] Using local SQLite')
   return createClient({ url: 'file:gyconnect.db' })
 }
 

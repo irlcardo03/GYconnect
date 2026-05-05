@@ -1,102 +1,97 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import turso from '@/lib/turso'
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
-    const body = await request.json()
-    const { telegram_id } = body
+    const { telegram_id, username } = await request.json()
 
     if (!telegram_id) {
       return NextResponse.json({ error: 'telegram_id is required' }, { status: 400 })
     }
 
-    // Check if profile exists
+    const adminTelegramId = process.env.ADMIN_TELEGRAM_ID
+
+    // Check if this is the admin
+    if (adminTelegramId && String(telegram_id) === String(adminTelegramId)) {
+      // Find existing admin profile
+      const existing = await turso.execute({
+        sql: 'SELECT * FROM profiles WHERE telegram_id = ?',
+        args: [String(telegram_id)]
+      })
+
+      if (existing.rows.length > 0) {
+        const profile = existing.rows[0]
+        // Ensure is_admin is set
+        if (Number(profile.is_admin) !== 1) {
+          await turso.execute({
+            sql: 'UPDATE profiles SET is_admin = 1, updated_at = datetime(\'now\') WHERE id = ?',
+            args: [String(profile.id)]
+          })
+        }
+        return NextResponse.json({ profile, isNew: false })
+      }
+
+      // Create admin profile
+      const id = crypto.randomUUID()
+      await turso.execute({
+        sql: `INSERT INTO profiles (id, telegram_id, username, is_admin, subscription_tier)
+              VALUES (?, ?, ?, 1, 'gold')`,
+        args: [id, String(telegram_id), username || '']
+      })
+
+      const result = await turso.execute({
+        sql: 'SELECT * FROM profiles WHERE id = ?',
+        args: [id]
+      })
+
+      return NextResponse.json({ profile: result.rows[0], isNew: false })
+    }
+
+    // Non-admin: find or create profile
     const existing = await turso.execute({
-      sql: `SELECT p.*, c.name as city_name, co.name as country_name, co.flag as country_flag
-            FROM profiles p
-            LEFT JOIN cities c ON p.city_id = c.id
-            LEFT JOIN countries co ON p.country_code = co.code
-            WHERE p.telegram_id = ?`,
-      args: [String(telegram_id)],
+      sql: 'SELECT * FROM profiles WHERE telegram_id = ?',
+      args: [String(telegram_id)]
     })
 
     if (existing.rows.length > 0) {
       const profile = existing.rows[0]
-      return NextResponse.json({
-        profile: {
-          ...profile,
-          tags: profile.tags ? String(profile.tags).split(',').filter(Boolean) : [],
-          vibes: profile.vibes ? String(profile.vibes).split(',').filter(Boolean) : [],
-        },
+      // Update username if provided
+      if (username && String(profile.username) !== username) {
+        await turso.execute({
+          sql: 'UPDATE profiles SET username = ?, updated_at = datetime(\'now\') WHERE id = ?',
+          args: [username, String(profile.id)]
+        })
+      }
+      // Update last_active
+      await turso.execute({
+        sql: 'UPDATE profiles SET last_active = datetime(\'now\') WHERE id = ?',
+        args: [String(profile.id)]
       })
+
+      const updated = await turso.execute({
+        sql: 'SELECT * FROM profiles WHERE id = ?',
+        args: [String(profile.id)]
+      })
+
+      const isNew = !String(updated.rows[0].first_name)
+      return NextResponse.json({ profile: updated.rows[0], isNew })
     }
 
     // Create new profile
     const id = crypto.randomUUID()
-    const now = new Date().toISOString()
-
     await turso.execute({
-      sql: `INSERT INTO profiles (id, telegram_id, created_at, updated_at, last_active)
-            VALUES (?, ?, ?, ?, ?)`,
-      args: [id, String(telegram_id), now, now, now],
+      sql: `INSERT INTO profiles (id, telegram_id, username)
+            VALUES (?, ?, ?)`,
+      args: [id, String(telegram_id), username || '']
     })
-
-    // Fetch the new profile with joins
-    const result = await turso.execute({
-      sql: `SELECT p.*, c.name as city_name, co.name as country_name, co.flag as country_flag
-            FROM profiles p
-            LEFT JOIN cities c ON p.city_id = c.id
-            LEFT JOIN countries co ON p.country_code = co.code
-            WHERE p.id = ?`,
-      args: [id],
-    })
-
-    return NextResponse.json({
-      profile: {
-        ...result.rows[0],
-        tags: [],
-        vibes: [],
-      },
-      is_new: true,
-    })
-  } catch (error: any) {
-    console.error('Auth error:', error)
-    return NextResponse.json({ error: error.message || 'Authentication failed' }, { status: 500 })
-  }
-}
-
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url)
-    const telegram_id = searchParams.get('telegram_id')
-
-    if (!telegram_id) {
-      return NextResponse.json({ error: 'telegram_id is required' }, { status: 400 })
-    }
 
     const result = await turso.execute({
-      sql: `SELECT p.*, c.name as city_name, co.name as country_name, co.flag as country_flag
-            FROM profiles p
-            LEFT JOIN cities c ON p.city_id = c.id
-            LEFT JOIN countries co ON p.country_code = co.code
-            WHERE p.telegram_id = ?`,
-      args: [telegram_id],
+      sql: 'SELECT * FROM profiles WHERE id = ?',
+      args: [id]
     })
 
-    if (result.rows.length === 0) {
-      return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
-    }
-
-    const profile = result.rows[0]
-    return NextResponse.json({
-      profile: {
-        ...profile,
-        tags: profile.tags ? String(profile.tags).split(',').filter(Boolean) : [],
-        vibes: profile.vibes ? String(profile.vibes).split(',').filter(Boolean) : [],
-      },
-    })
+    return NextResponse.json({ profile: result.rows[0], isNew: true })
   } catch (error: any) {
-    console.error('Get profile error:', error)
-    return NextResponse.json({ error: error.message || 'Failed to fetch profile' }, { status: 500 })
+    return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }

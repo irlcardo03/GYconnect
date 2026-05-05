@@ -1,19 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import turso from '@/lib/turso'
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
-    const body = await request.json()
-    const { code, profile_id } = body
+    const { code, profile_id } = await request.json()
 
     if (!code || !profile_id) {
       return NextResponse.json({ error: 'code and profile_id are required' }, { status: 400 })
     }
 
-    // Find the promo code
+    // Find promo code
     const promoResult = await turso.execute({
       sql: 'SELECT * FROM promo_codes WHERE code = ? AND is_active = 1',
-      args: [code],
+      args: [code]
     })
 
     if (promoResult.rows.length === 0) {
@@ -22,64 +21,61 @@ export async function POST(request: NextRequest) {
 
     const promo = promoResult.rows[0]
 
-    // Check max uses (0 = unlimited)
+    // Check max uses
     if (Number(promo.max_uses) > 0 && Number(promo.current_uses) >= Number(promo.max_uses)) {
-      return NextResponse.json({ error: 'Promo code has reached maximum uses' }, { status: 400 })
+      return NextResponse.json({ error: 'Promo code has reached max uses' }, { status: 400 })
     }
 
-    // Check if user already used this promo
+    // Check if already used by this profile
     const usageCheck = await turso.execute({
       sql: 'SELECT id FROM promo_code_usage WHERE promo_code_id = ? AND profile_id = ?',
-      args: [promo.id, profile_id],
+      args: [String(promo.id), profile_id]
     })
 
     if (usageCheck.rows.length > 0) {
-      return NextResponse.json({ error: 'You have already used this promo code' }, { status: 409 })
+      return NextResponse.json({ error: 'Promo code already used' }, { status: 400 })
     }
-
-    const now = new Date().toISOString()
 
     // Record usage
     const usageId = crypto.randomUUID()
     await turso.execute({
-      sql: `INSERT INTO promo_code_usage (id, promo_code_id, profile_id, used_at) VALUES (?, ?, ?, ?)`,
-      args: [usageId, promo.id, profile_id, now],
+      sql: 'INSERT INTO promo_code_usage (id, promo_code_id, profile_id) VALUES (?, ?, ?)',
+      args: [usageId, String(promo.id), profile_id]
     })
 
-    // Increment usage count
+    // Increment current_uses
     await turso.execute({
       sql: 'UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?',
-      args: [promo.id],
+      args: [String(promo.id)]
     })
 
-    // Apply subscription tier
+    // Update profile subscription
     const durationDays = Number(promo.duration_days) || 30
-    const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + durationDays)
-
     await turso.execute({
-      sql: `UPDATE profiles SET subscription_tier = ?, subscription_expires_at = ?, updated_at = ?
-            WHERE id = ?`,
-      args: [String(promo.tier), expiresAt.toISOString(), now, profile_id],
+      sql: `UPDATE profiles SET subscription_tier = ?, subscription_expires_at = datetime('now', '+' || ? || ' days'), updated_at = datetime('now') WHERE id = ?`,
+      args: [String(promo.tier), durationDays, profile_id]
     })
 
-    // If max uses reached after increment, deactivate
+    // Check if max uses reached, deactivate
     if (Number(promo.max_uses) > 0 && Number(promo.current_uses) + 1 >= Number(promo.max_uses)) {
       await turso.execute({
         sql: 'UPDATE promo_codes SET is_active = 0 WHERE id = ?',
-        args: [promo.id],
+        args: [String(promo.id)]
       })
     }
 
+    const updatedProfile = await turso.execute({
+      sql: 'SELECT * FROM profiles WHERE id = ?',
+      args: [profile_id]
+    })
+
     return NextResponse.json({
       success: true,
-      tier: promo.tier,
+      tier: String(promo.tier),
       duration_days: durationDays,
-      expires_at: expiresAt.toISOString(),
-      message: `${String(promo.tier).charAt(0).toUpperCase() + String(promo.tier).slice(1)} plan activated for ${durationDays} days!`,
+      profile: updatedProfile.rows[0]
     })
   } catch (error: any) {
-    console.error('Promo error:', error)
-    return NextResponse.json({ error: error.message || 'Failed to redeem promo code' }, { status: 500 })
+    return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }
