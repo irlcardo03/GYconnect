@@ -1,7 +1,9 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import turso from '@/lib/turso'
 
-export async function GET(request: Request) {
+const ADMIN_TELEGRAM_ID = '8262090447'
+
+export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const country_code = searchParams.get('country_code')
@@ -11,45 +13,54 @@ export async function GET(request: Request) {
     }
 
     const result = await turso.execute({
-      sql: 'SELECT * FROM cities WHERE country_code = ? AND active = 1 ORDER BY name',
-      args: [country_code]
+      sql: `SELECT * FROM cities WHERE country_code = ? AND active = 1 ORDER BY name ASC`,
+      args: [country_code],
     })
 
     return NextResponse.json({ cities: result.rows })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Cities error:', error)
+    return NextResponse.json({ error: error.message || 'Failed to fetch cities' }, { status: 500 })
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    const { country_code, names } = await request.json()
+    const body = await request.json()
+    const { country_code, name, admin_id } = body
 
-    if (!country_code || !names || !Array.isArray(names)) {
-      return NextResponse.json({ error: 'country_code and names array are required' }, { status: 400 })
+    if (!country_code || !name) {
+      return NextResponse.json({ error: 'country_code and name are required' }, { status: 400 })
     }
 
-    const timestamp = Date.now()
-    const added: string[] = []
-
-    for (let i = 0; i < names.length; i++) {
-      const id = `${country_code.toLowerCase()}-${timestamp}-${i}`
-      try {
-        await turso.execute({
-          sql: 'INSERT INTO cities (id, country_code, name) VALUES (?, ?, ?)',
-          args: [id, country_code, names[i]]
-        })
-        added.push(id)
-      } catch (e: any) {
-        // Skip duplicates
-        if (!e.message?.includes('UNIQUE constraint')) {
-          console.error('City insert error:', e.message)
-        }
-      }
+    // Admin check
+    if (admin_id !== ADMIN_TELEGRAM_ID) {
+      return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
     }
 
-    return NextResponse.json({ added, count: added.length })
+    const now = new Date().toISOString()
+    const id = crypto.randomUUID()
+
+    await turso.execute({
+      sql: `INSERT INTO cities (id, country_code, name, active, created_at) VALUES (?, ?, ?, 1, ?)`,
+      args: [id, country_code, name, now],
+    })
+
+    // Log admin action
+    const logId = crypto.randomUUID()
+    await turso.execute({
+      sql: `INSERT INTO admin_logs (id, admin_id, action, details, created_at) VALUES (?, ?, ?, ?, ?)`,
+      args: [logId, admin_id, 'add-city', `Added city: ${name} to country: ${country_code}`, now],
+    })
+
+    const result = await turso.execute({
+      sql: 'SELECT * FROM cities WHERE id = ?',
+      args: [id],
+    })
+
+    return NextResponse.json({ city: result.rows[0] }, { status: 201 })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Add city error:', error)
+    return NextResponse.json({ error: error.message || 'Failed to add city' }, { status: 500 })
   }
 }

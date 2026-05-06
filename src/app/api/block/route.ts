@@ -1,44 +1,70 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import turso from '@/lib/turso'
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    const { blocker_id, blocked_id } = await request.json()
+    const body = await request.json()
+    const { blocker_id, blocked_id } = body
 
     if (!blocker_id || !blocked_id) {
       return NextResponse.json({ error: 'blocker_id and blocked_id are required' }, { status: 400 })
     }
 
+    if (blocker_id === blocked_id) {
+      return NextResponse.json({ error: 'Cannot block yourself' }, { status: 400 })
+    }
+
+    const now = new Date().toISOString()
     const id = crypto.randomUUID()
+
+    try {
+      await turso.execute({
+        sql: `INSERT INTO blocks (id, blocker_id, blocked_id, created_at) VALUES (?, ?, ?, ?)`,
+        args: [id, blocker_id, blocked_id, now],
+      })
+    } catch (insertError: any) {
+      if (insertError.message?.includes('UNIQUE constraint')) {
+        return NextResponse.json({ error: 'User already blocked' }, { status: 409 })
+      }
+      throw insertError
+    }
+
+    // Also remove any existing matches between these users
     await turso.execute({
-      sql: 'INSERT OR IGNORE INTO blocks (id, blocker_id, blocked_id) VALUES (?, ?, ?)',
-      args: [id, blocker_id, blocked_id]
+      sql: `UPDATE matches SET is_matched = 0
+            WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)`,
+      args: [blocker_id, blocked_id, blocked_id, blocker_id],
     })
 
-    return NextResponse.json({ status: 'blocked' })
+    return NextResponse.json({ success: true, message: 'User blocked' })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Block error:', error)
+    return NextResponse.json({ error: error.message || 'Failed to block user' }, { status: 500 })
   }
 }
 
-export async function GET(request: Request) {
+export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
-    const profile_id = searchParams.get('profile_id')
+    const blocker_id = searchParams.get('blocker_id')
+    const blocked_id = searchParams.get('blocked_id')
 
-    if (!profile_id) {
-      return NextResponse.json({ error: 'profile_id is required' }, { status: 400 })
+    if (!blocker_id || !blocked_id) {
+      return NextResponse.json({ error: 'blocker_id and blocked_id are required' }, { status: 400 })
     }
 
     const result = await turso.execute({
-      sql: `SELECT b.*, p.username, p.first_name FROM blocks b
-            LEFT JOIN profiles p ON b.blocked_id = p.id
-            WHERE b.blocker_id = ?`,
-      args: [profile_id]
+      sql: 'DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?',
+      args: [blocker_id, blocked_id],
     })
 
-    return NextResponse.json({ blocked: result.rows })
+    if ((result.rowsAffected ?? 0) === 0) {
+      return NextResponse.json({ error: 'Block not found' }, { status: 404 })
+    }
+
+    return NextResponse.json({ success: true, message: 'User unblocked' })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Unblock error:', error)
+    return NextResponse.json({ error: error.message || 'Failed to unblock user' }, { status: 500 })
   }
 }

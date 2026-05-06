@@ -1,47 +1,38 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import turso from '@/lib/turso'
 
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const chat_id = searchParams.get('chat_id')
+    const profile_id = searchParams.get('profile_id')
 
     if (!chat_id) {
       return NextResponse.json({ error: 'chat_id is required' }, { status: 400 })
     }
 
+    // Fetch messages ordered by created_at ASC
     const result = await turso.execute({
-      sql: 'SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC LIMIT 50',
-      args: [chat_id]
+      sql: `SELECT m.*, p.first_name as sender_name
+            FROM messages m
+            LEFT JOIN profiles p ON m.sender_id = p.id
+            WHERE m.chat_id = ?
+            ORDER BY m.created_at ASC`,
+      args: [chat_id],
     })
+
+    // Mark unread messages as read for this profile
+    if (profile_id) {
+      await turso.execute({
+        sql: `UPDATE messages SET is_read = 1
+              WHERE chat_id = ? AND sender_id != ? AND is_read = 0`,
+        args: [chat_id, profile_id],
+      })
+    }
 
     return NextResponse.json({ messages: result.rows })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-}
-
-export async function POST(request: Request) {
-  try {
-    const { chat_id, sender_id, content, type = 'text' } = await request.json()
-
-    if (!chat_id || !sender_id || !content) {
-      return NextResponse.json({ error: 'chat_id, sender_id, and content are required' }, { status: 400 })
-    }
-
-    const id = crypto.randomUUID()
-    await turso.execute({
-      sql: 'INSERT INTO messages (id, chat_id, sender_id, content, type) VALUES (?, ?, ?, ?, ?)',
-      args: [id, chat_id, sender_id, content, type]
-    })
-
-    const result = await turso.execute({
-      sql: 'SELECT * FROM messages WHERE id = ?',
-      args: [id]
-    })
-
-    return NextResponse.json({ message: result.rows[0] })
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('Messages error:', error)
+    return NextResponse.json({ error: error.message || 'Failed to fetch messages' }, { status: 500 })
   }
 }
